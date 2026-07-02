@@ -65,6 +65,7 @@ export function Toolbar() {
   const gridSize = useApp((s) => s.gridSize);
   const autoNest = useApp((s) => s.autoNest);
   const smartGuidesOn = useApp((s) => s.smartGuidesOn);
+  const viewMode = useApp((s) => s.viewMode);
   const scale = useApp((s) => s.camera.scale);
   const recents = useApp((s) => s.recents);
   const canUndo = useZustandStore(useApp.temporal, (t) => t.pastStates.length > 0);
@@ -171,6 +172,13 @@ export function Toolbar() {
         </Menu>
         <button className="tb-btn" onClick={() => st().toggleDark()} title="다크 모드">
           {dark ? '☀' : '☾'}
+        </button>
+        <button
+          className="tb-btn active"
+          onClick={() => st().toggleViewMode()}
+          title="2D / 3D 보기 전환"
+        >
+          {viewMode === '3d' ? '3D' : '2D'}
         </button>
       </div>
       <div className="tb-row">

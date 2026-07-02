@@ -1,5 +1,5 @@
-import { memo, useRef } from 'react';
-import { Circle, Ellipse, Group, Rect, Text } from 'react-konva';
+import { memo, useEffect, useRef, useState } from 'react';
+import { Circle, Ellipse, Group, Image as KonvaImage, Rect, Text } from 'react-konva';
 import type Konva from 'konva';
 import type { KonvaEventObject } from 'konva/lib/Node';
 import type { GuideLine } from '../types';
@@ -36,6 +36,25 @@ function labelColor(hex: string): string {
   return lum > 150 ? '#222222' : '#ffffff';
 }
 
+function useLoadedImage(src?: string): HTMLImageElement | null {
+  const [image, setImage] = useState<HTMLImageElement | null>(null);
+  useEffect(() => {
+    if (!src) {
+      setImage(null);
+      return;
+    }
+    const img = new window.Image();
+    img.onload = () => setImage(img);
+    img.onerror = () => setImage(null);
+    img.src = src;
+    return () => {
+      img.onload = null;
+      img.onerror = null;
+    };
+  }, [src]);
+  return image;
+}
+
 export const ObjectNode = memo(function ObjectNode({ id }: { id: string }) {
   const item = useApp((s) => s.items[id]);
   const selected = useApp((s) => s.selection.includes(id));
@@ -43,6 +62,7 @@ export const ObjectNode = memo(function ObjectNode({ id }: { id: string }) {
   const groupMember = useApp((s) => hasGroupAncestor(s.items, id));
   const ctx = useRef<DragCtx | null>(null);
   const rafRef = useRef(0);
+  const image = useLoadedImage(item?.imageSrc);
 
   if (!item) return null;
 
@@ -253,6 +273,30 @@ export const ObjectNode = memo(function ObjectNode({ id }: { id: string }) {
           listening={!item.locked}
           perfectDrawEnabled={false}
         />
+      ) : item.imageSrc ? (
+        <>
+          <Rect
+            width={item.w}
+            height={item.h}
+            cornerRadius={Math.min(10, item.w / 10, item.h / 10)}
+            fill="#ffffff"
+            stroke={selected ? selStroke : baseStroke}
+            strokeWidth={selected ? 2 : 1}
+            strokeScaleEnabled={false}
+            listening={!item.locked}
+            perfectDrawEnabled={false}
+            shadowForStrokeEnabled={false}
+          />
+          {image && (
+            <KonvaImage
+              image={image}
+              width={item.w}
+              height={item.h}
+              listening={!item.locked}
+              perfectDrawEnabled={false}
+            />
+          )}
+        </>
       ) : item.shape === 'circle' ? (
         <Ellipse
           x={item.w / 2}

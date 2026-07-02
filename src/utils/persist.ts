@@ -12,6 +12,7 @@ export interface Prefs {
   autoNest?: boolean;
   smartGuidesOn?: boolean;
   dark?: boolean;
+  viewMode?: '2d' | '3d';
 }
 
 function readJson<T>(key: string): T | null {

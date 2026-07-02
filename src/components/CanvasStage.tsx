@@ -3,12 +3,15 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { pauseHistory, resumeHistory, useApp } from '../store/store';
 import type { Item } from '../types';
+import { CanvasStage2D } from './CanvasStage2D';
 import {
   absAABB,
   absTransform,
+  descendantIds,
   findDropTarget,
   localToWorldPoint,
   worldToLocalPoint,
+  type Box,
   type Pt,
 } from '../utils/geometry';
 import { getItemHeight } from '../utils/dimensions';
@@ -100,9 +103,142 @@ function snapPointToGrid(pt: Pt, gridSize: number): Pt {
   };
 }
 
+function projectedBox(item: Item, center: Pt, absRot: number): Box {
+  const half = itemWorldHalfExtents(item, absRot);
+  return {
+    left: center.x - half.x,
+    right: center.x + half.x,
+    top: center.y - half.y,
+    bottom: center.y + half.y,
+  };
+}
+
+function boxesOverlap(a: Box, b: Box): boolean {
+  return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+
+function pushOutOfBox(center: Pt, moving: Box, fixed: Box): Pt {
+  const pushLeft = fixed.left - moving.right;
+  const pushRight = fixed.right - moving.left;
+  const pushTop = fixed.top - moving.bottom;
+  const pushBottom = fixed.bottom - moving.top;
+  const options = [
+    { dx: pushLeft, dy: 0, d: Math.abs(pushLeft) },
+    { dx: pushRight, dy: 0, d: Math.abs(pushRight) },
+    { dx: 0, dy: pushTop, d: Math.abs(pushTop) },
+    { dx: 0, dy: pushBottom, d: Math.abs(pushBottom) },
+  ].sort((a, b) => a.d - b.d);
+  return { x: center.x + options[0].dx, y: center.y + options[0].dy };
+}
+
+function collisionIds(items: Record<string, Item>, rootIds: string[], movingId: string): string[] {
+  const blocked = new Set([movingId, ...descendantIds(items, movingId)]);
+  const out: string[] = [];
+  const walk = (ids: string[]) => {
+    for (const id of ids) {
+      const item = items[id];
+      if (!item || blocked.has(id) || !item.visible) continue;
+      if (item.type !== 'group') out.push(id);
+      walk(item.childIds);
+    }
+  };
+  walk(rootIds);
+  return out;
+}
+
+function resolveFootprintCollisions(
+  items: Record<string, Item>,
+  rootIds: string[],
+  movingId: string,
+  worldCenter: Pt,
+  topTargetId: string | null,
+): Pt {
+  const item = items[movingId];
+  if (!item) return worldCenter;
+  const ids = collisionIds(items, rootIds, movingId);
+  const absRot = absTransform(items, movingId).rot;
+  let center = worldCenter;
+
+  for (let pass = 0; pass < 4; pass += 1) {
+    let changed = false;
+    for (const id of ids) {
+      if (id === topTargetId) continue;
+      const fixed = absAABB(items, id);
+      const moving = projectedBox(item, center, absRot);
+      if (!boxesOverlap(moving, fixed)) continue;
+      center = pushOutOfBox(center, moving, fixed);
+      changed = true;
+    }
+    if (!changed) break;
+  }
+  return center;
+}
+
+function degToRad(deg: number | undefined): number {
+  return THREE.MathUtils.degToRad(deg ?? 0);
+}
+
+function bottomYAfterRotation(item: Item, height: number): number {
+  const geometry =
+    item.shape === 'circle'
+      ? new THREE.CylinderGeometry(item.w / 2, item.w / 2, height, 16)
+      : new THREE.BoxGeometry(item.w, height, item.h);
+  const matrix = new THREE.Matrix4().makeRotationFromEuler(
+    new THREE.Euler(degToRad(item.pitch), -degToRad(item.rotation), degToRad(item.roll), 'YXZ'),
+  );
+  const pos = geometry.getAttribute('position');
+  const v = new THREE.Vector3();
+  let minY = Infinity;
+  for (let i = 0; i < pos.count; i += 1) {
+    v.fromBufferAttribute(pos, i).applyMatrix4(matrix);
+    minY = Math.min(minY, v.y);
+  }
+  geometry.dispose();
+  return minY;
+}
+
+function verticalCenterForFloor(items: Record<string, Item>, item: Item, id: string, height: number): number {
+  const baseY = supportHeight(items, id);
+  return Math.max(baseY + height / 2, baseY - bottomYAfterRotation(item, height));
+}
+
 function colorWithAlpha(hex: string, alpha: number): THREE.Color {
   const color = new THREE.Color(/^#[0-9a-f]{6}$/i.test(hex) ? hex : '#b8bfc7');
   return color.lerp(new THREE.Color('#ffffff'), 1 - alpha);
+}
+
+function makeItemMaterial(item: Item): THREE.Material {
+  if (item.imageSrc) {
+    return new THREE.MeshStandardMaterial({
+      color: '#f5f5f5',
+      roughness: 0.72,
+      metalness: 0.02,
+    });
+  }
+  return new THREE.MeshStandardMaterial({
+    color: colorWithAlpha(item.color, item.locked ? 0.55 : 1),
+    roughness: 0.62,
+    metalness: 0.04,
+    transparent: item.type === 'group',
+    opacity: item.type === 'group' ? 0.12 : item.locked ? 0.64 : 1,
+  });
+}
+
+function makeImagePlane(item: Item, h: number): THREE.Mesh | null {
+  if (!item.imageSrc) return null;
+  const texture = new THREE.TextureLoader().load(item.imageSrc);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.anisotropy = 8;
+  const mat = new THREE.MeshBasicMaterial({
+    map: texture,
+    side: THREE.DoubleSide,
+    toneMapped: false,
+  });
+  const plane = new THREE.Mesh(new THREE.PlaneGeometry(item.w, item.h), mat);
+  plane.rotation.x = -Math.PI / 2;
+  plane.position.y = h / 2 + 2;
+  plane.userData.itemId = item.id;
+  return plane;
 }
 
 function makeLabel(text: string, dark: boolean): THREE.Sprite {
@@ -130,7 +266,7 @@ function makeLabel(text: string, dark: boolean): THREE.Sprite {
   return sprite;
 }
 
-export function CanvasStage() {
+function CanvasStage3D() {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -291,20 +427,15 @@ export function CanvasStage() {
       const h = getItemHeight(item);
       const x = t.cx - booth.w / 2;
       const z = t.cy - booth.h / 2;
-      const y = supportHeight(items, id) + h / 2;
+      const y = verticalCenterForFloor(items, item, id, h);
 
       const group = new THREE.Group();
       group.position.set(x, y, z);
-      group.rotation.y = -THREE.MathUtils.degToRad(t.rot);
+      group.rotation.order = 'YXZ';
+      group.rotation.set(degToRad(item.pitch), -THREE.MathUtils.degToRad(t.rot), degToRad(item.roll), 'YXZ');
       group.userData.itemId = id;
 
-      const mat = new THREE.MeshStandardMaterial({
-        color: colorWithAlpha(item.color, item.locked ? 0.55 : 1),
-        roughness: 0.62,
-        metalness: 0.04,
-        transparent: item.type === 'group',
-        opacity: item.type === 'group' ? 0.12 : item.locked ? 0.64 : 1,
-      });
+      const mat = makeItemMaterial(item);
       const geometry =
         item.shape === 'circle'
           ? new THREE.CylinderGeometry(item.w / 2, item.w / 2, h, 48)
@@ -315,6 +446,9 @@ export function CanvasStage() {
       mesh.userData.itemId = id;
       group.add(mesh);
 
+      const imagePlane = makeImagePlane(item, h);
+      if (imagePlane) group.add(imagePlane);
+
       const edgeColor = selected.has(id) ? (dark ? '#7ab5ff' : '#2563eb') : dark ? '#6d7480' : '#58606c';
       const edges = new THREE.LineSegments(
         new THREE.EdgesGeometry(geometry),
@@ -323,7 +457,7 @@ export function CanvasStage() {
       edges.userData.itemId = id;
       group.add(edges);
 
-      if (item.type !== 'group' && item.w > 130 && item.h > 130) {
+      if (!item.imageSrc && item.type !== 'group' && item.w > 130 && item.h > 130) {
         const label = makeLabel(item.name, dark);
         label.position.set(0, h / 2 + 90, 0);
         group.add(label);
@@ -400,11 +534,12 @@ export function CanvasStage() {
       y: drag.itemStart.y + dy,
     };
     let localNext = st.snapOn ? snapPointToGrid(desiredLocal, g) : desiredLocal;
+    let desiredWorld = localToWorldPoint(st.items, item.parentId, desiredLocal);
+    let topTarget = findDropTarget(st.items, st.rootIds, desiredWorld, [drag.id]);
 
     if (st.snapOn) {
-      const desiredWorld = localToWorldPoint(st.items, item.parentId, desiredLocal);
       const support =
-        findDropTarget(st.items, st.rootIds, desiredWorld, [drag.id]) ??
+        topTarget ??
         (item.parentId && st.items[item.parentId] ? item.parentId : null);
       const snappedWorld = snapToSupportEdges(
         st.items,
@@ -416,6 +551,19 @@ export function CanvasStage() {
       if (!samePoint(snappedWorld, desiredWorld)) {
         localNext = worldToLocalPoint(st.items, item.parentId, snappedWorld);
       }
+    }
+
+    desiredWorld = localToWorldPoint(st.items, item.parentId, localNext);
+    topTarget = findDropTarget(st.items, st.rootIds, desiredWorld, [drag.id]);
+    const resolvedWorld = resolveFootprintCollisions(
+      st.items,
+      st.rootIds,
+      drag.id,
+      desiredWorld,
+      topTarget,
+    );
+    if (!samePoint(resolvedWorld, desiredWorld)) {
+      localNext = worldToLocalPoint(st.items, item.parentId, resolvedWorld);
     }
 
     st.updateItems({ [drag.id]: localNext });
@@ -468,4 +616,9 @@ export function CanvasStage() {
       onContextMenu={(e) => e.preventDefault()}
     />
   );
+}
+
+export function CanvasStage() {
+  const viewMode = useApp((s) => s.viewMode);
+  return viewMode === '2d' ? <CanvasStage2D /> : <CanvasStage3D />;
 }

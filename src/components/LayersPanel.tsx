@@ -46,7 +46,14 @@ function LayerRow({
         </span>
         <span
           className={`layer-dot ${item.shape === 'circle' ? 'round' : ''}`}
-          style={{ background: item.type === 'group' ? 'transparent' : item.color, borderStyle: item.type === 'group' ? 'dashed' : 'solid' }}
+          style={{
+            background: item.imageSrc
+              ? `center / cover url("${item.imageSrc}")`
+              : item.type === 'group'
+                ? 'transparent'
+                : item.color,
+            borderStyle: item.type === 'group' ? 'dashed' : 'solid',
+          }}
         />
         {editingId === id ? (
           <input

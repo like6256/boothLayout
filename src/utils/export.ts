@@ -36,7 +36,9 @@ function itemToSvg(items: Record<string, Item>, id: string): string {
   const isGroup = it.type === 'group';
   let shape = '';
   if (!isGroup) {
-    if (it.shape === 'circle') {
+    if (it.imageSrc) {
+      shape = `<image href="${esc(it.imageSrc)}" width="${it.w}" height="${it.h}" preserveAspectRatio="none"/>`;
+    } else if (it.shape === 'circle') {
       shape = `<ellipse cx="${it.w / 2}" cy="${it.h / 2}" rx="${it.w / 2}" ry="${it.h / 2}" fill="${esc(it.color)}" stroke="#333333" stroke-width="3"/>`;
     } else {
       shape = `<rect width="${it.w}" height="${it.h}" rx="10" fill="${esc(it.color)}" stroke="#333333" stroke-width="3"/>`;
@@ -44,7 +46,7 @@ function itemToSvg(items: Record<string, Item>, id: string): string {
   }
   const fs = labelFontSize(it);
   const label =
-    !isGroup && fs >= 20
+    !it.imageSrc && !isGroup && fs >= 20
       ? `<text x="${it.w / 2}" y="${it.h / 2}" text-anchor="middle" dominant-baseline="central" font-family="${FONT_FAMILY}" font-size="${fs.toFixed(1)}" fill="${labelColor(it.color)}">${esc(it.name)}</text>`
       : '';
   const children = it.childIds.map((c) => itemToSvg(items, c)).join('');

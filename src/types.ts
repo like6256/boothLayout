@@ -23,7 +23,14 @@ export interface Item {
   h: number;
   /** 3D 렌더링 높이(mm). 오래된 저장 파일에는 없을 수 있어 기본값으로 보정한다. */
   height?: number;
+  /** 사용자가 가져온 이미지(data URL). 이미지 기물일 때 사용한다. */
+  imageSrc?: string;
+  /** 요(yaw): 위에서 내려다본 수직축 회전(도 단위). 기존 2D rotation 값. */
   rotation: number;
+  /** 피치(pitch): 좌우축 기준 앞뒤 기울임(도 단위). */
+  pitch?: number;
+  /** 롤(roll): 앞뒤축 기준 좌우 기울임(도 단위). */
+  roll?: number;
   color: string;
   memo: string;
   parentId: string | null;

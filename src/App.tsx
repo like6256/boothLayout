@@ -35,7 +35,8 @@ export default function App() {
         s.gridSize !== prev.gridSize ||
         s.autoNest !== prev.autoNest ||
         s.smartGuidesOn !== prev.smartGuidesOn ||
-        s.dark !== prev.dark;
+        s.dark !== prev.dark ||
+        s.viewMode !== prev.viewMode;
       prev = s;
       if (docChanged) {
         if (timer) clearTimeout(timer);
@@ -49,6 +50,7 @@ export default function App() {
           autoNest: s.autoNest,
           smartGuidesOn: s.smartGuidesOn,
           dark: s.dark,
+          viewMode: s.viewMode,
         });
       }
     });

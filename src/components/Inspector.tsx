@@ -136,7 +136,7 @@ function SingleInspector({ id }: { id: string }) {
   if (!item) return null;
   const st = () => useApp.getState();
   const abs = absTransform(items, id);
-  const typeLabel = item.type === 'group' ? '그룹' : CATALOG_MAP[item.type]?.label ?? '기물';
+  const typeLabel = item.type === 'group' ? '그룹' : item.imageSrc ? '이미지' : CATALOG_MAP[item.type]?.label ?? '기물';
 
   const setAbsCenter = (x: number, y: number) => {
     const local = worldToLocalPoint(items, item.parentId, { x, y });
@@ -176,11 +176,27 @@ function SingleInspector({ id }: { id: string }) {
       </div>
       <div className="field-pair">
         <NumField
-          label="회전"
+          label="요"
           mm={item.rotation}
           unit={unit}
           raw
           onCommit={(v) => st().updateItems({ [id]: { rotation: v } })}
+        />
+        <NumField
+          label="피치"
+          mm={item.pitch ?? 0}
+          unit={unit}
+          raw
+          onCommit={(v) => st().updateItems({ [id]: { pitch: v } })}
+        />
+      </div>
+      <div className="field-pair">
+        <NumField
+          label="롤"
+          mm={item.roll ?? 0}
+          unit={unit}
+          raw
+          onCommit={(v) => st().updateItems({ [id]: { roll: v } })}
         />
         <NumField
           label="높이"
@@ -190,7 +206,7 @@ function SingleInspector({ id }: { id: string }) {
         />
       </div>
       <div className="field-pair">
-        {item.type !== 'group' && <ColorField item={item} />}
+        {item.type !== 'group' && !item.imageSrc && <ColorField item={item} />}
       </div>
       <TextField
         label="메모"

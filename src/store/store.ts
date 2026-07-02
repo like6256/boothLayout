@@ -60,6 +60,7 @@ interface UISlice {
   autoNest: boolean;
   smartGuidesOn: boolean;
   dark: boolean;
+  viewMode: '2d' | '3d';
   tool: 'select' | 'pan';
   spaceDown: boolean;
   guides: GuideLine[];
@@ -80,6 +81,7 @@ interface Actions {
 
   // 기물 CRUD
   addFromCatalog: (key: string) => void;
+  addImageAsset: (asset: { name: string; src: string; w: number; h: number }) => void;
   updateItems: (patches: Record<string, Partial<Item>>) => void;
   deleteItems: (ids: string[]) => void;
   deleteSelection: () => void;
@@ -119,6 +121,8 @@ interface Actions {
   toggleAutoNest: () => void;
   toggleSmartGuides: () => void;
   toggleDark: () => void;
+  setViewMode: (mode: '2d' | '3d') => void;
+  toggleViewMode: () => void;
   setTool: (tool: 'select' | 'pan') => void;
   setSpaceDown: (down: boolean) => void;
   setGuides: (guides: GuideLine[]) => void;
@@ -140,6 +144,13 @@ const DEFAULT_BOOTH: BoothSpec = { w: 3000, h: 3000 };
 function normalizeDeg(d: number): number {
   const n = d % 360;
   return n < 0 ? n + 360 : Math.round(n * 100) / 100;
+}
+
+function normalizeSignedDeg(d: number): number {
+  let n = d % 360;
+  if (n > 180) n -= 360;
+  if (n < -180) n += 360;
+  return Math.round(n * 100) / 100;
 }
 
 function clampSize(v: number): number {
@@ -254,6 +265,7 @@ function initialUI(): UISlice {
     autoNest: prefs.autoNest ?? true,
     smartGuidesOn: prefs.smartGuidesOn ?? true,
     dark: prefs.dark ?? false,
+    viewMode: prefs.viewMode ?? '3d',
     tool: 'select',
     spaceDown: false,
     guides: [],
@@ -329,7 +341,46 @@ export const useApp = create<AppStore>()(
           h: entry.h,
           height: defaultItemHeight(key, entry.w, entry.h),
           rotation: 0,
+          pitch: 0,
+          roll: 0,
           color: entry.color,
+          memo: '',
+          parentId: null,
+          childIds: [],
+          visible: true,
+          locked: false,
+        };
+        set({
+          items: { ...s.items, [id]: item },
+          rootIds: [...s.rootIds, id],
+          selection: [id],
+        });
+      },
+
+      addImageAsset: (asset) => {
+        const s = get();
+        const center = viewportCenterWorld(s);
+        const g = s.gridSize;
+        const x = s.snapOn ? Math.round(center.x / g) * g : Math.round(center.x);
+        const y = s.snapOn ? Math.round(center.y / g) * g : Math.round(center.y);
+        const id = newId();
+        const w = clampSize(asset.w);
+        const h = clampSize(asset.h);
+        const item: Item = {
+          id,
+          type: 'image',
+          shape: 'rect',
+          name: asset.name || '이미지',
+          x,
+          y,
+          w,
+          h,
+          height: 20,
+          imageSrc: asset.src,
+          rotation: 0,
+          pitch: 0,
+          roll: 0,
+          color: '#ffffff',
           memo: '',
           parentId: null,
           childIds: [],
@@ -354,6 +405,8 @@ export const useApp = create<AppStore>()(
           if (patch.h !== undefined) next.h = clampSize(patch.h);
           if (patch.height !== undefined) next.height = clampHeight(patch.height);
           if (patch.rotation !== undefined) next.rotation = normalizeDeg(patch.rotation);
+          if (patch.pitch !== undefined) next.pitch = normalizeSignedDeg(patch.pitch);
+          if (patch.roll !== undefined) next.roll = normalizeSignedDeg(patch.roll);
           items[id] = next;
           changed = true;
         }
@@ -493,6 +546,8 @@ export const useApp = create<AppStore>()(
           h: box.bottom - box.top,
           height: defaultItemHeight('group', box.right - box.left, box.bottom - box.top),
           rotation: normalizeDeg(-groupParentRot),
+          pitch: 0,
+          roll: 0,
           color: 'transparent',
           memo: '',
           parentId: groupParent,
@@ -827,6 +882,8 @@ export const useApp = create<AppStore>()(
       toggleAutoNest: () => set({ autoNest: !get().autoNest }),
       toggleSmartGuides: () => set({ smartGuidesOn: !get().smartGuidesOn }),
       toggleDark: () => set({ dark: !get().dark }),
+      setViewMode: (viewMode) => set({ viewMode }),
+      toggleViewMode: () => set({ viewMode: get().viewMode === '3d' ? '2d' : '3d' }),
       setTool: (tool) => set({ tool }),
       setSpaceDown: (down) => {
         if (get().spaceDown !== down) set({ spaceDown: down });
