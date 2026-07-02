@@ -21,6 +21,8 @@ export interface Item {
   y: number;
   w: number;
   h: number;
+  /** 3D 렌더링 높이(mm). 오래된 저장 파일에는 없을 수 있어 기본값으로 보정한다. */
+  height?: number;
   rotation: number;
   color: string;
   memo: string;

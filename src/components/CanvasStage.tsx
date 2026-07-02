@@ -1,331 +1,471 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { Layer, Line, Rect, Stage, Text, Transformer } from 'react-konva';
-import Konva from 'konva';
-import type { KonvaEventObject } from 'konva/lib/Node';
-import { useApp } from '../store/store';
-import { ObjectNode } from './ObjectNode';
-import { GridAndBooth } from './GridLayer';
-import { Minimap } from './Minimap';
-import { absAABB, boxesIntersect, unionBoxes, type Box } from '../utils/geometry';
-import { fmtLen } from '../utils/units';
+import { useEffect, useRef, type PointerEvent as ReactPointerEvent } from 'react';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { pauseHistory, resumeHistory, useApp } from '../store/store';
+import type { Item } from '../types';
+import {
+  absAABB,
+  absTransform,
+  findDropTarget,
+  localToWorldPoint,
+  worldToLocalPoint,
+  type Pt,
+} from '../utils/geometry';
+import { getItemHeight } from '../utils/dimensions';
 
-Konva.dragDistance = 4;
+interface DragState {
+  id: string;
+  startPoint: THREE.Vector3;
+  itemStart: { x: number; y: number };
+  absRot: number;
+}
 
-interface Marquee {
-  x1: number;
-  y1: number;
-  x2: number;
-  y2: number;
+function supportHeight(items: Record<string, Item>, id: string): number {
+  const item = items[id];
+  if (!item?.parentId || !items[item.parentId]) return 0;
+  const parent = items[item.parentId];
+  if (parent.type === 'group') return supportHeight(items, parent.id);
+  return supportHeight(items, parent.id) + getItemHeight(parent);
+}
+
+function itemWorldHalfExtents(item: Item, absRot: number): { x: number; y: number } {
+  const r = THREE.MathUtils.degToRad(absRot);
+  const c = Math.abs(Math.cos(r));
+  const s = Math.abs(Math.sin(r));
+  return {
+    x: (item.w / 2) * c + (item.h / 2) * s,
+    y: (item.w / 2) * s + (item.h / 2) * c,
+  };
+}
+
+function nearestWithin(value: number, candidates: number[], threshold: number): number {
+  let best = value;
+  let bestDist = threshold;
+  for (const candidate of candidates) {
+    const dist = Math.abs(value - candidate);
+    if (dist <= bestDist) {
+      best = candidate;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+function snapToSupportEdges(
+  items: Record<string, Item>,
+  movingId: string,
+  supportId: string | null,
+  worldCenter: Pt,
+  threshold: number,
+): Pt {
+  if (!supportId || supportId === movingId || !items[supportId] || !items[movingId]) {
+    return worldCenter;
+  }
+  const moving = items[movingId];
+  const support = absAABB(items, supportId);
+  const rot = absTransform(items, movingId).rot;
+  const half = itemWorldHalfExtents(moving, rot);
+  return {
+    x: nearestWithin(
+      worldCenter.x,
+      [
+        support.left + half.x,
+        support.right - half.x,
+        support.left - half.x,
+        support.right + half.x,
+      ],
+      threshold,
+    ),
+    y: nearestWithin(
+      worldCenter.y,
+      [
+        support.top + half.y,
+        support.bottom - half.y,
+        support.top - half.y,
+        support.bottom + half.y,
+      ],
+      threshold,
+    ),
+  };
+}
+
+function samePoint(a: Pt, b: Pt): boolean {
+  return Math.abs(a.x - b.x) < 0.001 && Math.abs(a.y - b.y) < 0.001;
+}
+
+function snapPointToGrid(pt: Pt, gridSize: number): Pt {
+  return {
+    x: Math.round(pt.x / gridSize) * gridSize,
+    y: Math.round(pt.y / gridSize) * gridSize,
+  };
+}
+
+function colorWithAlpha(hex: string, alpha: number): THREE.Color {
+  const color = new THREE.Color(/^#[0-9a-f]{6}$/i.test(hex) ? hex : '#b8bfc7');
+  return color.lerp(new THREE.Color('#ffffff'), 1 - alpha);
+}
+
+function makeLabel(text: string, dark: boolean): THREE.Sprite {
+  const canvas = document.createElement('canvas');
+  canvas.width = 512;
+  canvas.height = 160;
+  const ctx = canvas.getContext('2d')!;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = '600 52px system-ui, Segoe UI, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 12;
+  ctx.strokeStyle = dark ? 'rgba(15,18,24,0.78)' : 'rgba(255,255,255,0.82)';
+  ctx.fillStyle = dark ? '#f4f7fb' : '#20242b';
+  const label = text.length > 16 ? `${text.slice(0, 15)}...` : text;
+  ctx.strokeText(label, canvas.width / 2, canvas.height / 2);
+  ctx.fillText(label, canvas.width / 2, canvas.height / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({ map: texture, transparent: true, depthTest: false }),
+  );
+  sprite.scale.set(420, 130, 1);
+  return sprite;
 }
 
 export function CanvasStage() {
   const containerRef = useRef<HTMLDivElement>(null);
-  const stageRef = useRef<Konva.Stage>(null);
-  const trRef = useRef<Konva.Transformer>(null);
-  const marqueeRef = useRef<Marquee | null>(null);
-  const panRef = useRef<{ sx: number; sy: number; camX: number; camY: number } | null>(null);
-  const pointerRaf = useRef(0);
-  const fitted = useRef(false);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  const objectLayerRef = useRef<THREE.Group | null>(null);
+  const objectMapRef = useRef(new Map<string, THREE.Object3D>());
+  const raycasterRef = useRef(new THREE.Raycaster());
+  const pointerRef = useRef(new THREE.Vector2());
+  const dragRef = useRef<DragState | null>(null);
+  const planeRef = useRef(new THREE.Plane(new THREE.Vector3(0, 1, 0), 0));
 
-  const rootIds = useApp((s) => s.rootIds);
   const items = useApp((s) => s.items);
+  const rootIds = useApp((s) => s.rootIds);
   const selection = useApp((s) => s.selection);
-  const camera = useApp((s) => s.camera);
-  const size = useApp((s) => s.containerSize);
-  const guides = useApp((s) => s.guides);
+  const booth = useApp((s) => s.booth);
+  const gridOn = useApp((s) => s.gridOn);
+  const gridSize = useApp((s) => s.gridSize);
   const dark = useApp((s) => s.dark);
-  const unit = useApp((s) => s.unit);
   const tool = useApp((s) => s.tool);
   const spaceDown = useApp((s) => s.spaceDown);
-  const [marquee, setMarquee] = useState<Marquee | null>(null);
+  const cameraState = useApp((s) => s.camera);
 
-  const panActive = tool === 'pan' || spaceDown;
-
-  // 컨테이너 크기 추적
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const update = () =>
-      useApp.getState().setContainerSize(el.clientWidth, el.clientHeight);
-    update();
-    const ro = new ResizeObserver(update);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(dark ? '#191c22' : '#e9ebef');
+    sceneRef.current = scene;
+
+    const camera = new THREE.PerspectiveCamera(45, 1, 1, 200000);
+    cameraRef.current = camera;
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    rendererRef.current = renderer;
+    el.appendChild(renderer.domElement);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.08;
+    controls.screenSpacePanning = false;
+    controls.maxPolarAngle = Math.PI * 0.48;
+    controls.minDistance = 500;
+    controls.maxDistance = 80000;
+    controlsRef.current = controls;
+
+    scene.add(new THREE.HemisphereLight(dark ? '#dbe8ff' : '#ffffff', '#9098a5', 1.9));
+    const sun = new THREE.DirectionalLight('#ffffff', 2.2);
+    sun.position.set(-3500, 6000, 3000);
+    sun.castShadow = true;
+    sun.shadow.camera.near = 100;
+    sun.shadow.camera.far = 20000;
+    sun.shadow.mapSize.set(2048, 2048);
+    scene.add(sun);
+
+    const objectLayer = new THREE.Group();
+    objectLayerRef.current = objectLayer;
+    scene.add(objectLayer);
+
+    const resize = () => {
+      const w = el.clientWidth || 1;
+      const h = el.clientHeight || 1;
+      renderer.setSize(w, h, false);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+      useApp.getState().setContainerSize(w, h);
+    };
+    resize();
+    const ro = new ResizeObserver(resize);
     ro.observe(el);
-    return () => ro.disconnect();
+
+    let frame = 0;
+    const animate = () => {
+      controls.update();
+      renderer.render(scene, camera);
+      frame = requestAnimationFrame(animate);
+    };
+    frame = requestAnimationFrame(animate);
+
+    return () => {
+      cancelAnimationFrame(frame);
+      ro.disconnect();
+      controls.dispose();
+      renderer.dispose();
+      renderer.domElement.remove();
+      scene.clear();
+    };
   }, []);
 
-  // 첫 로드 시 부스에 맞춰 화면 정렬
   useEffect(() => {
-    if (!fitted.current && size.w > 50) {
-      fitted.current = true;
-      useApp.getState().fitView();
+    const scene = sceneRef.current;
+    if (scene) scene.background = new THREE.Color(dark ? '#191c22' : '#e9ebef');
+  }, [dark]);
+
+  useEffect(() => {
+    const camera = cameraRef.current;
+    const controls = controlsRef.current;
+    if (!camera || !controls) return;
+    const cx = booth.w / 2;
+    const cz = booth.h / 2;
+    const span = Math.max(booth.w, booth.h, 1000);
+    const zoom = Math.max(0.005, cameraState.scale);
+    const dist = THREE.MathUtils.clamp((span * 1.8) / zoom, 1200, 80000);
+    controls.target.set(0, 0, 0);
+    camera.position.set(cx - booth.w / 2 + dist * 0.55, dist * 0.58, cz - booth.h / 2 + dist * 0.8);
+    camera.lookAt(controls.target);
+    controls.update();
+  }, [booth.w, booth.h, cameraState.scale]);
+
+  useEffect(() => {
+    const controls = controlsRef.current;
+    if (!controls) return;
+    const panActive = tool === 'pan' || spaceDown;
+    controls.enableRotate = panActive;
+    controls.enablePan = true;
+    controls.mouseButtons.LEFT = panActive ? THREE.MOUSE.ROTATE : null;
+  }, [tool, spaceDown]);
+
+  useEffect(() => {
+    const layer = objectLayerRef.current;
+    if (!layer) return;
+    layer.clear();
+    objectMapRef.current.clear();
+
+    const floorMat = new THREE.MeshStandardMaterial({
+      color: dark ? '#242934' : '#ffffff',
+      roughness: 0.86,
+      metalness: 0.02,
+    });
+    const floor = new THREE.Mesh(new THREE.BoxGeometry(booth.w, 18, booth.h), floorMat);
+    floor.position.set(0, -9, 0);
+    floor.receiveShadow = true;
+    layer.add(floor);
+
+    const border = new THREE.LineSegments(
+      new THREE.EdgesGeometry(new THREE.BoxGeometry(booth.w, 20, booth.h)),
+      new THREE.LineBasicMaterial({ color: dark ? '#f1f5fb' : '#1f242e' }),
+    );
+    border.position.copy(floor.position);
+    layer.add(border);
+
+    if (gridOn) {
+      const divisions = Math.max(2, Math.ceil(Math.max(booth.w, booth.h) / gridSize));
+      const helper = new THREE.GridHelper(Math.max(booth.w, booth.h), divisions, dark ? '#536070' : '#a8b0bc', dark ? '#343b46' : '#d1d6dd');
+      helper.position.y = 2;
+      layer.add(helper);
     }
-  }, [size]);
 
-  // Transformer에 선택 노드 연결
-  useEffect(() => {
-    const tr = trRef.current;
-    const stage = stageRef.current;
-    if (!tr || !stage) return;
-    const nodes = selection
-      .filter((id) => {
-        const it = items[id];
-        return it && !it.locked && it.visible;
-      })
-      .map((id) => stage.findOne('#' + id))
-      .filter((n): n is Konva.Group => Boolean(n));
-    tr.nodes(nodes);
-    tr.getLayer()?.batchDraw();
-  }, [selection, items]);
+    const selected = new Set(selection);
+    const addItem = (id: string) => {
+      const item = items[id];
+      if (!item || !item.visible) return;
+      const t = absTransform(items, id);
+      const h = getItemHeight(item);
+      const x = t.cx - booth.w / 2;
+      const z = t.cy - booth.h / 2;
+      const y = supportHeight(items, id) + h / 2;
 
-  // 마퀴 선택 확정
-  const finishMarquee = () => {
-    const m = marqueeRef.current;
-    if (!m) return;
-    marqueeRef.current = null;
-    setMarquee(null);
-    const st = useApp.getState();
-    const box: Box = {
-      left: Math.min(m.x1, m.x2),
-      right: Math.max(m.x1, m.x2),
-      top: Math.min(m.y1, m.y2),
-      bottom: Math.max(m.y1, m.y2),
+      const group = new THREE.Group();
+      group.position.set(x, y, z);
+      group.rotation.y = -THREE.MathUtils.degToRad(t.rot);
+      group.userData.itemId = id;
+
+      const mat = new THREE.MeshStandardMaterial({
+        color: colorWithAlpha(item.color, item.locked ? 0.55 : 1),
+        roughness: 0.62,
+        metalness: 0.04,
+        transparent: item.type === 'group',
+        opacity: item.type === 'group' ? 0.12 : item.locked ? 0.64 : 1,
+      });
+      const geometry =
+        item.shape === 'circle'
+          ? new THREE.CylinderGeometry(item.w / 2, item.w / 2, h, 48)
+          : new THREE.BoxGeometry(item.w, h, item.h);
+      const mesh = new THREE.Mesh(geometry, mat);
+      mesh.castShadow = item.type !== 'group';
+      mesh.receiveShadow = true;
+      mesh.userData.itemId = id;
+      group.add(mesh);
+
+      const edgeColor = selected.has(id) ? (dark ? '#7ab5ff' : '#2563eb') : dark ? '#6d7480' : '#58606c';
+      const edges = new THREE.LineSegments(
+        new THREE.EdgesGeometry(geometry),
+        new THREE.LineBasicMaterial({ color: edgeColor }),
+      );
+      edges.userData.itemId = id;
+      group.add(edges);
+
+      if (item.type !== 'group' && item.w > 130 && item.h > 130) {
+        const label = makeLabel(item.name, dark);
+        label.position.set(0, h / 2 + 90, 0);
+        group.add(label);
+      }
+
+      objectMapRef.current.set(id, group);
+      layer.add(group);
+      for (const childId of item.childIds) addItem(childId);
     };
-    const tiny = box.right - box.left < 3 / st.camera.scale && box.bottom - box.top < 3 / st.camera.scale;
-    if (tiny) {
+
+    for (const id of rootIds) addItem(id);
+  }, [items, rootIds, selection, booth, gridOn, gridSize, dark]);
+
+  const setPointerFromEvent = (event: PointerEvent) => {
+    const renderer = rendererRef.current;
+    const camera = cameraRef.current;
+    if (!renderer || !camera) return null;
+    const rect = renderer.domElement.getBoundingClientRect();
+    pointerRef.current.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+    pointerRef.current.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+    raycasterRef.current.setFromCamera(pointerRef.current, camera);
+    const pt = new THREE.Vector3();
+    if (!raycasterRef.current.ray.intersectPlane(planeRef.current, pt)) return null;
+    useApp.getState().setPointer({ x: pt.x + booth.w / 2, y: pt.z + booth.h / 2 });
+    return pt;
+  };
+
+  const pickItem = () => {
+    const objects = [...objectMapRef.current.values()];
+    const hits = raycasterRef.current.intersectObjects(objects, true);
+    const hit = hits.find((h) => h.object.userData.itemId);
+    return hit?.object.userData.itemId as string | undefined;
+  };
+
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || tool === 'pan' || spaceDown) return;
+    const pt = setPointerFromEvent(event.nativeEvent);
+    const id = pickItem();
+    const st = useApp.getState();
+    if (!id) {
       st.clearSelection();
       return;
     }
-    const hit = st.rootIds.filter((id) => {
-      const it = st.items[id];
-      if (!it || !it.visible || it.locked) return false;
-      return boxesIntersect(box, absAABB(st.items, id));
-    });
-    st.setSelection(hit);
+    const item = st.items[id];
+    if (!item || item.locked) return;
+    if (event.shiftKey || event.ctrlKey) st.toggleSelect(id);
+    else if (!st.selection.includes(id)) st.setSelection([id]);
+    if (!pt) return;
+    const startAbs = absTransform(st.items, id);
+    pauseHistory();
+    dragRef.current = {
+      id,
+      startPoint: pt.clone(),
+      itemStart: { x: item.x, y: item.y },
+      absRot: startAbs.rot,
+    };
+    controlsRef.current!.enabled = false;
+    event.currentTarget.setPointerCapture(event.pointerId);
   };
 
-  useEffect(() => {
-    const onUp = () => finishMarquee();
-    window.addEventListener('mouseup', onUp);
-    return () => window.removeEventListener('mouseup', onUp);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const toWorld = (p: { x: number; y: number }) => {
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const pt = setPointerFromEvent(event.nativeEvent);
+    const drag = dragRef.current;
+    if (!pt || !drag) return;
     const st = useApp.getState();
-    return {
-      x: (p.x - st.camera.x) / st.camera.scale,
-      y: (p.y - st.camera.y) / st.camera.scale,
-    };
-  };
+    const dx = pt.x - drag.startPoint.x;
+    const dy = pt.z - drag.startPoint.z;
+    const g = st.gridSize;
+    const item = st.items[drag.id];
+    if (!item) return;
 
-  const onStageMouseDown = (e: KonvaEventObject<MouseEvent>) => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    // 중간 버튼: 수동 팬
-    if (e.evt.button === 1) {
-      e.evt.preventDefault();
-      const st = useApp.getState();
-      panRef.current = {
-        sx: e.evt.clientX,
-        sy: e.evt.clientY,
-        camX: st.camera.x,
-        camY: st.camera.y,
-      };
-      return;
+    const desiredLocal: Pt = {
+      x: drag.itemStart.x + dx,
+      y: drag.itemStart.y + dy,
+    };
+    let localNext = st.snapOn ? snapPointToGrid(desiredLocal, g) : desiredLocal;
+
+    if (st.snapOn) {
+      const desiredWorld = localToWorldPoint(st.items, item.parentId, desiredLocal);
+      const support =
+        findDropTarget(st.items, st.rootIds, desiredWorld, [drag.id]) ??
+        (item.parentId && st.items[item.parentId] ? item.parentId : null);
+      const snappedWorld = snapToSupportEdges(
+        st.items,
+        drag.id,
+        support,
+        desiredWorld,
+        Math.max(8, Math.min(32, st.gridSize * 0.25)),
+      );
+      if (!samePoint(snappedWorld, desiredWorld)) {
+        localNext = worldToLocalPoint(st.items, item.parentId, snappedWorld);
+      }
     }
-    if (e.target !== stage) return;
-    if (panActive || e.evt.button !== 0) return;
-    const p = stage.getPointerPosition();
-    if (!p) return;
-    const w = toWorld(p);
-    marqueeRef.current = { x1: w.x, y1: w.y, x2: w.x, y2: w.y };
-    setMarquee(marqueeRef.current);
+
+    st.updateItems({ [drag.id]: localNext });
   };
 
-  const onStageMouseMove = () => {
-    const stage = stageRef.current;
-    if (!stage) return;
-    const p = stage.getPointerPosition();
-    if (!p) return;
-    const w = toWorld(p);
-    if (marqueeRef.current) {
-      marqueeRef.current = { ...marqueeRef.current, x2: w.x, y2: w.y };
-      setMarquee(marqueeRef.current);
-    }
-    if (!pointerRaf.current) {
-      pointerRaf.current = requestAnimationFrame(() => {
-        pointerRaf.current = 0;
-        useApp.getState().setPointer(w);
-      });
-    }
-  };
-
-  // 중간 버튼 팬: window 레벨에서 추적
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
-      const pan = panRef.current;
-      if (!pan) return;
-      useApp.getState().setCamera({
-        x: pan.camX + (e.clientX - pan.sx),
-        y: pan.camY + (e.clientY - pan.sy),
-      });
-    };
-    const onUp = () => {
-      panRef.current = null;
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, []);
-
-  const onWheel = (e: KonvaEventObject<WheelEvent>) => {
-    e.evt.preventDefault();
-    const stage = stageRef.current;
-    if (!stage) return;
-    const p = stage.getPointerPosition();
-    if (!p) return;
-    useApp.getState().zoomAt(p, e.evt.deltaY > 0 ? 1 / 1.1 : 1.1);
-  };
-
-  // 스페이스/팬 도구로 스테이지 자체 드래그 → 카메라 동기화
-  const onStageDragMove = (e: KonvaEventObject<DragEvent>) => {
-    const stage = stageRef.current;
-    if (!stage || e.target !== stage) return;
-    useApp.getState().setCamera({ x: stage.x(), y: stage.y() });
-  };
-
-  const handleTransformEnd = () => {
-    const tr = trRef.current;
-    if (!tr) return;
+  const finishDrag = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    dragRef.current = null;
     const st = useApp.getState();
-    const patches: Record<string, Partial<{ x: number; y: number; w: number; h: number; rotation: number }>> = {};
-    for (const node of tr.nodes() as Konva.Group[]) {
-      const id = node.id();
-      const it = st.items[id];
-      if (!it) continue;
-      const sx = node.scaleX();
-      const sy = node.scaleY();
-      node.scale({ x: 1, y: 1 });
-      patches[id] = {
-        x: node.x(),
-        y: node.y(),
-        w: Math.max(10, it.w * Math.abs(sx)),
-        h: Math.max(10, it.h * Math.abs(sy)),
-        rotation: node.rotation(),
-      };
+    const item = st.items[drag.id];
+    if (item) {
+      const finalPos = { x: item.x, y: item.y };
+      const finalWorld = absTransform(st.items, drag.id);
+      st.updateItems({ [drag.id]: drag.itemStart });
+      resumeHistory();
+
+      const target =
+        st.autoNest && item.type !== 'group'
+          ? findDropTarget(st.items, st.rootIds, { x: finalWorld.cx, y: finalWorld.cy }, [drag.id])
+          : null;
+      const currentParent = item.parentId && st.items[item.parentId] ? item.parentId : null;
+      st.commitDrag({
+        positions: { [drag.id]: finalPos },
+        reparent:
+          target !== currentParent
+            ? {
+                id: drag.id,
+                parentId: target,
+                world: { x: finalWorld.cx, y: finalWorld.cy },
+                absRot: drag.absRot,
+              }
+            : undefined,
+      });
+    } else {
+      resumeHistory();
     }
-    if (Object.keys(patches).length > 0) st.updateItems(patches);
+    controlsRef.current!.enabled = true;
+    event.currentTarget.releasePointerCapture(event.pointerId);
   };
-
-  // 선택 치수 라벨
-  const selBoxInfo = useMemo(() => {
-    const tops = selection.filter((id) => items[id]);
-    if (tops.length === 0) return null;
-    const boxes = tops.map((id) => absAABB(items, id));
-    const u = unionBoxes(boxes);
-    if (!u) return null;
-    if (tops.length === 1) {
-      const it = items[tops[0]];
-      return { box: u, w: it.w, h: it.h };
-    }
-    return { box: u, w: u.right - u.left, h: u.bottom - u.top };
-  }, [selection, items]);
-
-  const accent = dark ? '#7ab5ff' : '#2563eb';
-  const guideColor = '#e11d8f';
 
   return (
     <div
       ref={containerRef}
-      className={`canvas-wrap ${panActive ? 'panning' : ''}`}
+      className={`canvas-wrap ${tool === 'pan' || spaceDown ? 'panning' : ''}`}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={finishDrag}
+      onPointerCancel={finishDrag}
       onContextMenu={(e) => e.preventDefault()}
-    >
-      <Stage
-        ref={stageRef}
-        width={size.w}
-        height={size.h}
-        x={camera.x}
-        y={camera.y}
-        scaleX={camera.scale}
-        scaleY={camera.scale}
-        draggable={panActive}
-        onMouseDown={onStageMouseDown}
-        onMouseMove={onStageMouseMove}
-        onMouseUp={finishMarquee}
-        onWheel={onWheel}
-        onDragMove={onStageDragMove}
-        onDragEnd={onStageDragMove}
-      >
-        <Layer listening={false}>
-          <GridAndBooth />
-        </Layer>
-        <Layer listening={!panActive}>
-          {rootIds.map((id) => (
-            <ObjectNode key={id} id={id} />
-          ))}
-        </Layer>
-        <Layer>
-          {guides.map((g, i) => (
-            <Line
-              key={i}
-              points={g.points}
-              stroke={guideColor}
-              strokeWidth={1}
-              strokeScaleEnabled={false}
-              dash={[6 / camera.scale, 4 / camera.scale]}
-              listening={false}
-            />
-          ))}
-          {marquee && (
-            <Rect
-              x={Math.min(marquee.x1, marquee.x2)}
-              y={Math.min(marquee.y1, marquee.y2)}
-              width={Math.abs(marquee.x2 - marquee.x1)}
-              height={Math.abs(marquee.y2 - marquee.y1)}
-              fill={dark ? 'rgba(122,181,255,0.12)' : 'rgba(37,99,235,0.10)'}
-              stroke={accent}
-              strokeWidth={1}
-              strokeScaleEnabled={false}
-              listening={false}
-            />
-          )}
-          {selBoxInfo && (
-            <Text
-              x={selBoxInfo.box.left}
-              y={selBoxInfo.box.bottom + 10 / camera.scale}
-              width={selBoxInfo.box.right - selBoxInfo.box.left}
-              align="center"
-              text={`${fmtLen(selBoxInfo.w, unit)} × ${fmtLen(selBoxInfo.h, unit)} ${unit}`}
-              fontSize={13 / camera.scale}
-              fill={accent}
-              listening={false}
-            />
-          )}
-          <Transformer
-            ref={trRef}
-            rotateEnabled
-            enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
-            rotationSnaps={[0, 45, 90, 135, 180, 225, 270, 315]}
-            rotationSnapTolerance={6}
-            keepRatio={false}
-            flipEnabled={false}
-            ignoreStroke
-            anchorSize={9}
-            anchorCornerRadius={3}
-            anchorStroke={accent}
-            anchorFill={dark ? '#20242c' : '#ffffff'}
-            borderStroke={accent}
-            onTransformEnd={handleTransformEnd}
-            boundBoxFunc={(oldBox, newBox) =>
-              Math.abs(newBox.width) < 4 || Math.abs(newBox.height) < 4 ? oldBox : newBox
-            }
-          />
-        </Layer>
-      </Stage>
-      <Minimap />
-    </div>
+    />
   );
 }

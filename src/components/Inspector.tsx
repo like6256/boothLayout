@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { pauseHistory, resumeHistory, useApp } from '../store/store';
 import { absTransform, worldToLocalPoint } from '../utils/geometry';
+import { getItemHeight } from '../utils/dimensions';
 import { fromMm, toMm } from '../utils/units';
 import type { AlignKind, Item, Unit } from '../types';
 import { CATALOG_MAP } from '../presets';
@@ -181,6 +182,14 @@ function SingleInspector({ id }: { id: string }) {
           raw
           onCommit={(v) => st().updateItems({ [id]: { rotation: v } })}
         />
+        <NumField
+          label="높이"
+          mm={getItemHeight(item)}
+          unit={unit}
+          onCommit={(v) => st().updateItems({ [id]: { height: v } })}
+        />
+      </div>
+      <div className="field-pair">
         {item.type !== 'group' && <ColorField item={item} />}
       </div>
       <TextField

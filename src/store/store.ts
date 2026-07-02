@@ -33,6 +33,7 @@ import {
   saveFavorites,
   saveRecents,
 } from '../utils/persist';
+import { defaultItemHeight } from '../utils/dimensions';
 
 /** undo/redo 대상이 되는 문서 부분 */
 interface DocSlice {
@@ -143,6 +144,10 @@ function normalizeDeg(d: number): number {
 
 function clampSize(v: number): number {
   return Math.min(50000, Math.max(10, v));
+}
+
+function clampHeight(v: number): number {
+  return Math.min(20000, Math.max(10, v));
 }
 
 /** 조상이 선택에 함께 들어있는 id는 제거 (부모/자식 동시 선택 금지) */
@@ -322,6 +327,7 @@ export const useApp = create<AppStore>()(
           y,
           w: entry.w,
           h: entry.h,
+          height: defaultItemHeight(key, entry.w, entry.h),
           rotation: 0,
           color: entry.color,
           memo: '',
@@ -346,6 +352,7 @@ export const useApp = create<AppStore>()(
           const next = { ...items[id], ...patch };
           if (patch.w !== undefined) next.w = clampSize(patch.w);
           if (patch.h !== undefined) next.h = clampSize(patch.h);
+          if (patch.height !== undefined) next.height = clampHeight(patch.height);
           if (patch.rotation !== undefined) next.rotation = normalizeDeg(patch.rotation);
           items[id] = next;
           changed = true;
@@ -484,6 +491,7 @@ export const useApp = create<AppStore>()(
           y: localCenter.y,
           w: box.right - box.left,
           h: box.bottom - box.top,
+          height: defaultItemHeight('group', box.right - box.left, box.bottom - box.top),
           rotation: normalizeDeg(-groupParentRot),
           color: 'transparent',
           memo: '',
